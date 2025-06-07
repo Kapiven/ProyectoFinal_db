@@ -1,6 +1,6 @@
 import psycopg2
 from psycopg2 import OperationalError
-from database import DATABASE_URL # Importa la URL de la base de datos
+from database import DATABASE_URL 
 
 def execute_sql_command(sql_command, commit=False):
     """Ejecuta un comando SQL y maneja la conexión."""
