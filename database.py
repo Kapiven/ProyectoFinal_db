@@ -1,108 +1,106 @@
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, ForeignKey, 
-    DateTime, Boolean, Text, Table, Numeric, CheckConstraint
-)
-from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import TypeDecorator
-from datetime import datetime
-import re
+from sqlalchemy import create_engine, Column, Integer, String, Numeric, DateTime, Date, ForeignKey, Text, Boolean, CheckConstraint, event, DDL, UniqueConstraint
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy.types import TypeDecorator, TEXT
+from sqlalchemy.dialects import postgresql
+import json
+import re # Para validación de RegEx
+import psycopg2 # Necesario para las funciones SQL en queries.py
+from datetime import datetime, date
 
 # Configuración de la base de datos
-engine = create_engine('postgresql://usuario:contraseña@localhost/proyecto_bd')
+DATABASE_URL = "postgresql+psycopg2://postgres:datos2025@localhost/institucion"
+engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# --------------------------------------------
-# TIPOS DE DATOS PERSONALIZADOS (5 requeridos)
-# --------------------------------------------
+def obtener_session():
+    """Retorna una nueva instancia de sesión para interactuar con la base de datos."""
+    return Session()
 
-class TipoEmail(TypeDecorator):
-    """Valida formato de email"""
-    impl = String(100)
-
-    def process_bind_param(self, value, dialect):
-        if value and not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', value):
-            raise ValueError("Formato de email inválido")
-        return value
+# --- TypeDecorators Personalizados ---
 
 class TipoDNI(TypeDecorator):
-    """Valida DNI (8 dígitos + letra opcional)"""
-    impl = String(10)
+    """Define un tipo de dato para DNI (8 dígitos + 1 letra)."""
+    impl = String(10) # DNI español: 8 números + 1 letra
+
+    cache_ok = True # Optimizacion para SQLAlchemy 1.4+
 
     def process_bind_param(self, value, dialect):
-        if value and not re.match(r'^\d{8}[A-Za-z]?$', value):
-            raise ValueError("DNI debe tener 8 dígitos y una letra opcional")
+        if value is not None:
+            if not re.fullmatch(r'^\d{8}[TRWAGMYFPDXBNJZSQVHLCKE]$', value.upper()):
+                raise ValueError("Formato de DNI inválido. Debe ser 8 números seguidos de una letra (ej. 12345678A).")
+            return value.upper()
+        return value
+
+    def process_result_value(self, value, dialect):
+        return value
+
+class TipoEmail(TypeDecorator):
+    """Define un tipo de dato para direcciones de email."""
+    impl = String(255)
+
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            if not re.fullmatch(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', value):
+                raise ValueError("Formato de email inválido.")
+            return value.lower()
+        return value
+
+    def process_result_value(self, value, dialect):
         return value
 
 class TipoTelefono(TypeDecorator):
-    """Valida teléfono (+XX XXX XXX XXX)"""
-    impl = String(15)
+    """Define un tipo de dato para números de teléfono (con código de país)."""
+    impl = String(20) # Ej. +XX YYY ZZZ ZZZ
+
+    cache_ok = True
 
     def process_bind_param(self, value, dialect):
-        if value and not re.match(r'^\+\d{2,3} \d{3} \d{3} \d{3}$', value):
-            raise ValueError("Formato: +XX XXX XXX XXX")
+        if value is not None:
+            # Permite formatos como +XX XXX XXX XXX, XXXXXXXXXX, o con guiones/espacios
+            if not re.fullmatch(r'^\+?\d[\d\s-]{7,18}\d$', value):
+                raise ValueError("Formato de teléfono inválido. Debe contener solo números, espacios, guiones y opcionalmente un '+' al inicio.")
+            return value.replace(" ", "").replace("-", "") # Normalizar para almacenamiento
+        return value
+
+    def process_result_value(self, value, dialect):
         return value
 
 class TipoJSON(TypeDecorator):
-    """Almacena datos JSON validados"""
-    impl = Text
+    """Define un tipo de dato para almacenar JSON en la base de datos."""
+    impl = TEXT 
+
+    cache_ok = True
 
     def process_bind_param(self, value, dialect):
-        if value:
-            import json
+        if value is not None:
             return json.dumps(value)
         return value
 
     def process_result_value(self, value, dialect):
-        if value:
-            import json
+        if value is not None:
             return json.loads(value)
         return value
 
 class TipoMoneda(TypeDecorator):
-    """Valida formato $XX.XX"""
-    impl = String(10)
+    """Define un tipo de dato para almacenar valores de moneda como string "$XX.XX"."""
+    impl = String(20) # Suficiente para "$999,999,999.99"
+
+    cache_ok = True
 
     def process_bind_param(self, value, dialect):
-        if value and not re.match(r'^\$\d+\.\d{2}$', value):
-            raise ValueError("Formato: $XX.XX")
+        if value is not None:
+            if not isinstance(value, str) or not re.fullmatch(r'^\$\d{1,3}(,\d{3})*(\.\d{2})?$', value):
+                raise ValueError("Formato de moneda inválido. Debe ser '$X.XX' (ej. $12.34 o $1,234.56).")
+            return value
         return value
 
-# --------------------------------------------
-# TABLAS DE CRUCE N:M (3 requeridas)
-# --------------------------------------------
+    def process_result_value(self, value, dialect):
+        return value
 
-producto_proveedor = Table(
-    'producto_proveedor',
-    Base.metadata,
-    Column('producto_id', Integer, ForeignKey('productos.id'), primary_key=True),
-    Column('proveedor_id', Integer, ForeignKey('proveedores.id'), primary_key=True),
-    Column('precio_compra', Numeric(10, 2)),
-    Column('fecha_acuerdo', DateTime, default=datetime.now)
-)
-
-cliente_servicio = Table(
-    'cliente_servicio',
-    Base.metadata,
-    Column('cliente_id', Integer, ForeignKey('clientes.id'), primary_key=True),
-    Column('servicio_id', Integer, ForeignKey('servicios.id'), primary_key=True),
-    Column('fecha_contratacion', DateTime, default=datetime.now),
-    Column('estado', String(20), default='activo')
-)
-
-empleado_departamento = Table(
-    'empleado_departamento',
-    Base.metadata,
-    Column('empleado_id', Integer, ForeignKey('empleados.id'), primary_key=True),
-    Column('departamento_id', Integer, ForeignKey('departamentos.id'), primary_key=True),
-    Column('fecha_asignacion', DateTime, default=datetime.now),
-    Column('cargo', String(50))
-)
-
-# --------------------------------------------
-# MODELOS PRINCIPALES (20 TABLAS)
-# --------------------------------------------
+# --- Definición de Modelos de Tablas ---
 
 class Categoria(Base):
     __tablename__ = 'categorias'
@@ -110,365 +108,485 @@ class Categoria(Base):
     nombre = Column(String(50), nullable=False, unique=True)
     descripcion = Column(Text)
     activa = Column(Boolean, default=True)
-    
-    # Relaciones
+
     productos = relationship("Producto", back_populates="categoria")
+
+    def __repr__(self):
+        return f"<Categoria(id={self.id}, nombre='{self.nombre}')>"
+
+class Proveedor(Base):
+    __tablename__ = 'proveedores'
+    id = Column(Integer, primary_key=True)
+    codigo = Column(String(20), unique=True, nullable=False)
+    nombre = Column(String(100), nullable=False)
+    contacto = Column(String(100))
+    telefono = Column(TipoTelefono)
+    email = Column(TipoEmail)
+    direccion = Column(TipoJSON) # Almacena como JSON
+    fecha_registro = Column(DateTime, default=datetime.now)
+    activo = Column(Boolean, default=True)
+
+    productos = relationship("Producto", secondary="producto_proveedor", back_populates="proveedores")
+    compras = relationship("Compra", back_populates="proveedor")
+
+    def __repr__(self):
+        return f"<Proveedor(id={self.id}, nombre='{self.nombre}')>"
 
 class Producto(Base):
     __tablename__ = 'productos'
     id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
+    codigo = Column(String(20), unique=True, nullable=False)
     nombre = Column(String(100), nullable=False)
     descripcion = Column(Text)
     precio = Column(Numeric(10, 2), nullable=False)
-    stock = Column(Integer, default=0, nullable=False)
+    stock = Column(Integer, default=0)
     stock_minimo = Column(Integer, default=5)
-    categoria_id = Column(Integer, ForeignKey('categorias.id'))
+    categoria_id = Column(Integer, ForeignKey('categorias.id'), nullable=False)
     fecha_creacion = Column(DateTime, default=datetime.now)
     activo = Column(Boolean, default=True)
-    
-    # Relaciones
-    categoria = relationship("Categoria", back_populates="productos")
-    proveedores = relationship("Proveedor", secondary=producto_proveedor, back_populates="productos")
-    detalles_pedido = relationship("DetallePedido", back_populates="producto")
-    movimientos_inventario = relationship("MovimientoInventario", back_populates="producto")
 
-    # Validaciones a nivel de BD
+    categoria = relationship("Categoria", back_populates="productos")
+    proveedores = relationship("Proveedor", secondary="producto_proveedor", back_populates="productos")
+    inventarios = relationship("Inventario", back_populates="producto")
+    movimientos_inventario = relationship("MovimientoInventario", back_populates="producto")
+    detalle_pedidos = relationship("DetallePedido", back_populates="producto")
+    detalle_ventas = relationship("DetalleVenta", back_populates="producto")
+    detalle_compras = relationship("DetalleCompra", back_populates="producto")
+
     __table_args__ = (
         CheckConstraint('precio > 0', name='precio_positivo'),
         CheckConstraint('stock >= 0', name='stock_no_negativo'),
         CheckConstraint('stock_minimo >= 0', name='stock_minimo_no_negativo')
     )
 
-class Proveedor(Base):
-    __tablename__ = 'proveedores'
-    id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
-    nombre = Column(String(100), nullable=False)
-    contacto = Column(String(100))
-    telefono = Column(TipoTelefono)
-    email = Column(TipoEmail)
-    direccion = Column(TipoJSON)
-    fecha_registro = Column(DateTime, default=datetime.now)
-    activo = Column(Boolean, default=True)
-    
-    # Relaciones
-    productos = relationship("Producto", secondary=producto_proveedor, back_populates="proveedores")
-    compras = relationship("Compra", back_populates="proveedor")
+    def __repr__(self):
+        return f"<Producto(id={self.id}, nombre='{self.nombre}', stock={self.stock})>"
+
+# Tabla de cruce para relación muchos a muchos Producto-Proveedor
+class ProductoProveedor(Base):
+    __tablename__ = 'producto_proveedor'
+    producto_id = Column(Integer, ForeignKey('productos.id'), primary_key=True)
+    proveedor_id = Column(Integer, ForeignKey('proveedores.id'), primary_key=True)
+    __table_args__ = (UniqueConstraint('producto_id', 'proveedor_id', name='uq_producto_proveedor'),)
 
 class Cliente(Base):
     __tablename__ = 'clientes'
     id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
-    nombre = Column(String(100), nullable=False)
-    apellido = Column(String(100), nullable=False)
-    dni = Column(TipoDNI, unique=True)
-    telefono = Column(TipoTelefono)
-    email = Column(TipoEmail)
-    direccion = Column(TipoJSON)
-    fecha_nacimiento = Column(DateTime)
+    codigo = Column(String(20), unique=True, nullable=False)
+    nombre = Column(String(50), nullable=False)
+    apellido = Column(String(50))
+    dni = Column(TipoDNI, unique=True, nullable=False) # Usa TipoDNI
+    telefono = Column(TipoTelefono) # Usa TipoTelefono
+    email = Column(TipoEmail, unique=True) # Usa TipoEmail
+    direccion = Column(TipoJSON) # Almacena como JSON
+    fecha_nacimiento = Column(Date)
     fecha_registro = Column(DateTime, default=datetime.now)
     activo = Column(Boolean, default=True)
-    
-    # Relaciones
+
     pedidos = relationship("Pedido", back_populates="cliente")
     facturas = relationship("Factura", back_populates="cliente")
-    servicios = relationship("Servicio", secondary=cliente_servicio, back_populates="clientes")
+    servicios = relationship("Servicio", secondary="cliente_servicio", back_populates="clientes")
+
+    __table_args__ = (
+        CheckConstraint("fecha_nacimiento <= CURRENT_DATE", name='fecha_nacimiento_valida'),
+    )
+
+    def __repr__(self):
+        return f"<Cliente(id={self.id}, nombre='{self.nombre} {self.apellido}')>"
+
+# Tabla de cruce para relación muchos a muchos Cliente-Servicio
+class ClienteServicio(Base):
+    __tablename__ = 'cliente_servicio'
+    cliente_id = Column(Integer, ForeignKey('clientes.id'), primary_key=True)
+    servicio_id = Column(Integer, ForeignKey('servicios.id'), primary_key=True)
+    fecha_contratacion = Column(DateTime, default=datetime.now)
+    __table_args__ = (UniqueConstraint('cliente_id', 'servicio_id', name='uq_cliente_servicio'),)
 
 class Pedido(Base):
     __tablename__ = 'pedidos'
     id = Column(Integer, primary_key=True)
-    numero = Column(String(20), nullable=False, unique=True)
+    numero = Column(String(20), unique=True, nullable=False)
     fecha = Column(DateTime, default=datetime.now)
-    estado = Column(String(20), nullable=False, default='pendiente')
-    total = Column(Numeric(10, 2), default=0)
+    total = Column(Numeric(12, 2), default=0.00) # Se actualizará por trigger
+    estado = Column(String(20), default='pendiente') # pendiente, procesando, completado, cancelado
+    cliente_id = Column(Integer, ForeignKey('clientes.id'), nullable=False)
+    empleado_id = Column(Integer, ForeignKey('empleados.id'), nullable=False)
     observaciones = Column(Text)
-    cliente_id = Column(Integer, ForeignKey('clientes.id'))
-    empleado_id = Column(Integer, ForeignKey('empleados.id'))
-    
-    # Relaciones
+
     cliente = relationship("Cliente", back_populates="pedidos")
     empleado = relationship("Empleado", back_populates="pedidos")
-    detalles = relationship("DetallePedido", back_populates="pedido")
+    detalles = relationship("DetallePedido", back_populates="pedido", cascade="all, delete-orphan")
 
     __table_args__ = (
-        CheckConstraint("estado IN ('pendiente', 'procesando', 'completado', 'cancelado')", name='estado_valido'),
-        CheckConstraint('total >= 0', name='total_no_negativo')
+        CheckConstraint("total >= 0", name='total_pedido_no_negativo'),
+        CheckConstraint("estado IN ('pendiente', 'procesando', 'completado', 'cancelado')", name='estado_pedido_valido')
     )
+
+    def __repr__(self):
+        return f"<Pedido(id={self.id}, numero='{self.numero}', total={self.total}, estado='{self.estado}')>"
 
 class DetallePedido(Base):
     __tablename__ = 'detalle_pedidos'
     id = Column(Integer, primary_key=True)
-    pedido_id = Column(Integer, ForeignKey('pedidos.id'))
-    producto_id = Column(Integer, ForeignKey('productos.id'))
+    pedido_id = Column(Integer, ForeignKey('pedidos.id'), nullable=False)
+    producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
     cantidad = Column(Integer, nullable=False)
     precio_unitario = Column(Numeric(10, 2), nullable=False)
-    subtotal = Column(Numeric(10, 2), nullable=False)
-    descuento = Column(Numeric(5, 2), default=0)
-    
-    # Relaciones
+    subtotal = Column(Numeric(12, 2), nullable=False) # Cantidad * PrecioUnitario * (1 - Descuento/100)
+    descuento = Column(Numeric(5, 2), default=0.00) # Porcentaje de descuento
+
     pedido = relationship("Pedido", back_populates="detalles")
-    producto = relationship("Producto", back_populates="detalles_pedido")
+    producto = relationship("Producto", back_populates="detalle_pedidos")
 
     __table_args__ = (
-        CheckConstraint('cantidad > 0', name='cantidad_positiva'),
-        CheckConstraint('precio_unitario > 0', name='precio_unitario_positivo'),
-        CheckConstraint('descuento >= 0 AND descuento <= 100', name='descuento_valido')
+        CheckConstraint('cantidad > 0', name='cantidad_positiva_dp'),
+        CheckConstraint('precio_unitario > 0', name='precio_unitario_positivo_dp'),
+        CheckConstraint('subtotal >= 0', name='subtotal_no_negativo_dp'),
+        CheckConstraint('descuento >= 0 AND descuento <= 100', name='descuento_valido_dp')
     )
+
+    def __repr__(self):
+        return f"<DetallePedido(id={self.id}, pedido_id={self.pedido_id}, producto_id={self.producto_id}, cantidad={self.cantidad})>"
 
 class Servicio(Base):
     __tablename__ = 'servicios'
     id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
+    codigo = Column(String(20), unique=True, nullable=False)
     nombre = Column(String(100), nullable=False)
     descripcion = Column(Text)
-    costo = Column(TipoMoneda)
-    duracion = Column(Integer)  # Duración en horas
+    costo = Column(TipoMoneda, nullable=False) # Usa TipoMoneda
+    duracion = Column(Integer) # En horas, por ejemplo
     activo = Column(Boolean, default=True)
-    
-    # Relaciones
-    clientes = relationship("Cliente", secondary=cliente_servicio, back_populates="servicios")
 
-class Empleado(Base):
-    __tablename__ = 'empleados'
-    id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
-    nombre = Column(String(100), nullable=False)
-    apellido = Column(String(100), nullable=False)
-    dni = Column(TipoDNI, unique=True)
-    telefono = Column(TipoTelefono)
-    email = Column(TipoEmail)
-    salario = Column(Numeric(10, 2))
-    fecha_ingreso = Column(DateTime, default=datetime.now)
-    activo = Column(Boolean, default=True)
-    puesto_id = Column(Integer, ForeignKey('puestos.id'))
-    
-    # Relaciones
-    puesto = relationship("Puesto", back_populates="empleados")
-    departamentos = relationship("Departamento", secondary=empleado_departamento, back_populates="empleados")
-    pedidos = relationship("Pedido", back_populates="empleado")
-    ventas = relationship("Venta", back_populates="empleado")
+    clientes = relationship("Cliente", secondary="cliente_servicio", back_populates="servicios")
 
     __table_args__ = (
-        CheckConstraint('salario > 0', name='salario_positivo'),
+        CheckConstraint('duracion > 0', name='duracion_positiva'),
     )
 
-class Departamento(Base):
-    __tablename__ = 'departamentos'
-    id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
-    nombre = Column(String(100), nullable=False, unique=True)
-    descripcion = Column(Text)
-    presupuesto = Column(Numeric(12, 2))
-    activo = Column(Boolean, default=True)
-    
-    # Relaciones
-    empleados = relationship("Empleado", secondary=empleado_departamento, back_populates="departamentos")
+    def __repr__(self):
+        return f"<Servicio(id={self.id}, nombre='{self.nombre}', costo='{self.costo}')>"
 
 class Puesto(Base):
     __tablename__ = 'puestos'
     id = Column(Integer, primary_key=True)
-    nombre = Column(String(100), nullable=False, unique=True)
+    nombre = Column(String(50), nullable=False, unique=True)
     descripcion = Column(Text)
     salario_minimo = Column(Numeric(10, 2))
     salario_maximo = Column(Numeric(10, 2))
     activo = Column(Boolean, default=True)
-    
-    # Relaciones
+
     empleados = relationship("Empleado", back_populates="puesto")
 
     __table_args__ = (
-        CheckConstraint('salario_minimo <= salario_maximo', name='salarios_coherentes'),
+        CheckConstraint('salario_minimo >= 0', name='salario_minimo_positivo'),
+        CheckConstraint('salario_maximo >= salario_minimo', name='salario_maximo_valido')
     )
+
+    def __repr__(self):
+        return f"<Puesto(id={self.id}, nombre='{self.nombre}')>"
+
+class Departamento(Base):
+    __tablename__ = 'departamentos'
+    id = Column(Integer, primary_key=True)
+    codigo = Column(String(20), unique=True, nullable=False)
+    nombre = Column(String(50), nullable=False, unique=True)
+    descripcion = Column(Text)
+    presupuesto = Column(Numeric(12, 2), default=0.00)
+    activo = Column(Boolean, default=True)
+
+    empleados = relationship("Empleado", secondary="empleado_departamento", back_populates="departamentos")
+
+    __table_args__ = (
+        CheckConstraint('presupuesto >= 0', name='presupuesto_no_negativo'),
+    )
+
+    def __repr__(self):
+        return f"<Departamento(id={self.id}, nombre='{self.nombre}')>"
+
+# Tabla de cruce para relación muchos a muchos Empleado-Departamento
+class EmpleadoDepartamento(Base):
+    __tablename__ = 'empleado_departamento'
+    empleado_id = Column(Integer, ForeignKey('empleados.id'), primary_key=True)
+    departamento_id = Column(Integer, ForeignKey('departamentos.id'), primary_key=True)
+    __table_args__ = (UniqueConstraint('empleado_id', 'departamento_id', name='uq_empleado_departamento'),)
+
+class Empleado(Base):
+    __tablename__ = 'empleados'
+    id = Column(Integer, primary_key=True)
+    codigo = Column(String(20), unique=True, nullable=False)
+    nombre = Column(String(50), nullable=False)
+    apellido = Column(String(50))
+    dni = Column(TipoDNI, unique=True, nullable=False) # Usa TipoDNI
+    telefono = Column(TipoTelefono) # Usa TipoTelefono
+    email = Column(TipoEmail, unique=True) # Usa TipoEmail
+    salario = Column(Numeric(10, 2), nullable=False)
+    fecha_ingreso = Column(DateTime, default=datetime.now)
+    puesto_id = Column(Integer, ForeignKey('puestos.id'), nullable=False)
+    activo = Column(Boolean, default=True)
+
+    puesto = relationship("Puesto", back_populates="empleados")
+    departamentos = relationship("Departamento", secondary="empleado_departamento", back_populates="empleados")
+    pedidos = relationship("Pedido", back_populates="empleado")
+    ventas = relationship("Venta", back_populates="empleado")
+    compras = relationship("Compra", back_populates="empleado")
+    movimientos_inventario = relationship("MovimientoInventario", back_populates="empleado")
+
+    __table_args__ = (
+        CheckConstraint('salario >= 0', name='salario_no_negativo_emp'),
+        CheckConstraint('fecha_ingreso <= CURRENT_TIMESTAMP', name='fecha_ingreso_valida')
+    )
+
+    def __repr__(self):
+        return f"<Empleado(id={self.id}, nombre='{self.nombre} {self.apellido}')>"
 
 class Factura(Base):
     __tablename__ = 'facturas'
     id = Column(Integer, primary_key=True)
-    numero = Column(String(20), nullable=False, unique=True)
+    numero = Column(String(50), unique=True, nullable=False)
     fecha = Column(DateTime, default=datetime.now)
-    subtotal = Column(Numeric(10, 2), nullable=False)
+    subtotal = Column(Numeric(12, 2), nullable=False)
     impuesto = Column(Numeric(10, 2), nullable=False)
-    total = Column(Numeric(10, 2), nullable=False)
-    estado = Column(String(20), default='pendiente')
-    cliente_id = Column(Integer, ForeignKey('clientes.id'))
-    
-    # Relaciones
+    total = Column(Numeric(12, 2), nullable=False)
+    estado = Column(String(20), default='pendiente') # pendiente, pagada, vencida, anulada
+    cliente_id = Column(Integer, ForeignKey('clientes.id'), nullable=False)
+
     cliente = relationship("Cliente", back_populates="facturas")
-    pagos = relationship("Pago", back_populates="factura")
+    pagos = relationship("Pago", back_populates="factura", cascade="all, delete-orphan")
 
     __table_args__ = (
-        CheckConstraint("estado IN ('pendiente', 'pagada', 'vencida', 'anulada')", name='estado_factura_valido'),
+        CheckConstraint('subtotal >= 0', name='subtotal_no_negativo_fact'),
+        CheckConstraint('impuesto >= 0', name='impuesto_no_negativo_fact'),
+        CheckConstraint('total >= 0', name='total_no_negativo_fact'),
+        CheckConstraint("estado IN ('pendiente', 'pagada', 'vencida', 'anulada')", name='estado_factura_valido')
     )
+
+    def __repr__(self):
+        return f"<Factura(id={self.id}, numero='{self.numero}', total={self.total}, estado='{self.estado}')>"
 
 class Pago(Base):
     __tablename__ = 'pagos'
     id = Column(Integer, primary_key=True)
-    numero = Column(String(20), nullable=False, unique=True)
+    numero = Column(String(50), unique=True, nullable=False)
     fecha = Column(DateTime, default=datetime.now)
-    monto = Column(Numeric(10, 2), nullable=False)
+    monto = Column(Numeric(12, 2), nullable=False)
     metodo = Column(String(50), nullable=False)
     referencia = Column(String(100))
-    factura_id = Column(Integer, ForeignKey('facturas.id'))
-    
-    # Relaciones
+    factura_id = Column(Integer, ForeignKey('facturas.id'), nullable=False)
+
     factura = relationship("Factura", back_populates="pagos")
 
     __table_args__ = (
-        CheckConstraint('monto > 0', name='monto_positivo'),
-        CheckConstraint("metodo IN ('efectivo', 'tarjeta', 'transferencia', 'cheque')", name='metodo_valido')
+        CheckConstraint('monto > 0', name='monto_pago_positivo'),
+        CheckConstraint("metodo IN ('efectivo', 'tarjeta', 'transferencia', 'cheque')", name='metodo_pago_valido')
     )
+
+    def __repr__(self):
+        return f"<Pago(id={self.id}, numero='{self.numero}', monto={self.monto})>"
+
+class Sucursal(Base):
+    __tablename__ = 'sucursales'
+    id = Column(Integer, primary_key=True)
+    codigo = Column(String(20), unique=True, nullable=False)
+    nombre = Column(String(100), nullable=False)
+    direccion = Column(TipoJSON) # Almacena como JSON
+    telefono = Column(TipoTelefono) # Usa TipoTelefono
+    email = Column(TipoEmail) # Usa TipoEmail
+    activa = Column(Boolean, default=True)
+
+    inventarios = relationship("Inventario", back_populates="sucursal")
+    ventas = relationship("Venta", back_populates="sucursal")
+
+    def __repr__(self):
+        return f"<Sucursal(id={self.id}, nombre='{self.nombre}')>"
 
 class Venta(Base):
     __tablename__ = 'ventas'
     id = Column(Integer, primary_key=True)
     fecha = Column(DateTime, default=datetime.now)
-    total = Column(Numeric(10, 2), nullable=False)
-    empleado_id = Column(Integer, ForeignKey('empleados.id'))
-    sucursal_id = Column(Integer, ForeignKey('sucursales.id'))
-    
-    # Relaciones
+    total = Column(Numeric(12, 2), default=0.00) # Se actualizará por trigger si hay uno
+    empleado_id = Column(Integer, ForeignKey('empleados.id'), nullable=False)
+    sucursal_id = Column(Integer, ForeignKey('sucursales.id'), nullable=False)
+
     empleado = relationship("Empleado", back_populates="ventas")
     sucursal = relationship("Sucursal", back_populates="ventas")
-    detalles = relationship("DetalleVenta", back_populates="venta")
+    detalles = relationship("DetalleVenta", back_populates="venta", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint('total >= 0', name='total_venta_no_negativo'),
+    )
+
+    def __repr__(self):
+        return f"<Venta(id={self.id}, total={self.total}, fecha='{self.fecha.strftime('%Y-%m-%d')}')>"
 
 class DetalleVenta(Base):
     __tablename__ = 'detalle_ventas'
     id = Column(Integer, primary_key=True)
-    venta_id = Column(Integer, ForeignKey('ventas.id'))
-    producto_id = Column(Integer, ForeignKey('productos.id'))
+    venta_id = Column(Integer, ForeignKey('ventas.id'), nullable=False)
+    producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
     cantidad = Column(Integer, nullable=False)
     precio_unitario = Column(Numeric(10, 2), nullable=False)
-    subtotal = Column(Numeric(10, 2), nullable=False)
-    
-    # Relaciones
-    venta = relationship("Venta", back_populates="detalles")
-    producto = relationship("Producto")
+    subtotal = Column(Numeric(12, 2), nullable=False) # Cantidad * PrecioUnitario
 
-class Sucursal(Base):
-    __tablename__ = 'sucursales'
+    venta = relationship("Venta", back_populates="detalles")
+    producto = relationship("Producto", back_populates="detalle_ventas")
+
+    __table_args__ = (
+        CheckConstraint('cantidad > 0', name='cantidad_positiva_dv'),
+        CheckConstraint('precio_unitario > 0', name='precio_unitario_positivo_dv'),
+        CheckConstraint('subtotal >= 0', name='subtotal_no_negativo_dv')
+    )
+
+    def __repr__(self):
+        return f"<DetalleVenta(id={self.id}, venta_id={self.venta_id}, producto_id={self.producto_id}, cantidad={self.cantidad})>"
+
+class Compra(Base):
+    __tablename__ = 'compras'
     id = Column(Integer, primary_key=True)
-    codigo = Column(String(20), nullable=False, unique=True)
-    nombre = Column(String(100), nullable=False)
-    direccion = Column(String(200))
-    telefono = Column(TipoTelefono)
-    email = Column(TipoEmail)
-    activa = Column(Boolean, default=True)
-    
-    # Relaciones
-    ventas = relationship("Venta", back_populates="sucursal")
-    inventarios = relationship("Inventario", back_populates="sucursal")
+    numero = Column(String(20), unique=True, nullable=False)
+    fecha = Column(DateTime, default=datetime.now)
+    total = Column(Numeric(12, 2), default=0.00) # Se actualizará por trigger
+    estado = Column(String(20), default='pendiente') # pendiente, recibida, cancelada
+    proveedor_id = Column(Integer, ForeignKey('proveedores.id'), nullable=False)
+    empleado_id = Column(Integer, ForeignKey('empleados.id'), nullable=False)
+
+    proveedor = relationship("Proveedor", back_populates="compras")
+    empleado = relationship("Empleado", back_populates="compras")
+    detalles = relationship("DetalleCompra", back_populates="compra", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint('total >= 0', name='total_compra_no_negativo'),
+        CheckConstraint("estado IN ('pendiente', 'recibida', 'cancelada')", name='estado_compra_valido')
+    )
+
+    def __repr__(self):
+        return f"<Compra(id={self.id}, numero='{self.numero}', total={self.total}, estado='{self.estado}')>"
+
+class DetalleCompra(Base):
+    __tablename__ = 'detalle_compras'
+    id = Column(Integer, primary_key=True)
+    compra_id = Column(Integer, ForeignKey('compras.id'), nullable=False)
+    producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
+    cantidad = Column(Integer, nullable=False)
+    precio_unitario = Column(Numeric(10, 2), nullable=False)
+    subtotal = Column(Numeric(12, 2), nullable=False) # Cantidad * PrecioUnitario
+
+    compra = relationship("Compra", back_populates="detalles")
+    producto = relationship("Producto", back_populates="detalle_compras")
+
+    __table_args__ = (
+        CheckConstraint('cantidad > 0', name='cantidad_positiva_dc'),
+        CheckConstraint('precio_unitario > 0', name='precio_unitario_positivo_dc'),
+        CheckConstraint('subtotal >= 0', name='subtotal_no_negativo_dc')
+    )
+
+    def __repr__(self):
+        return f"<DetalleCompra(id={self.id}, compra_id={self.compra_id}, producto_id={self.producto_id}, cantidad={self.cantidad})>"
 
 class Inventario(Base):
     __tablename__ = 'inventario'
     id = Column(Integer, primary_key=True)
-    producto_id = Column(Integer, ForeignKey('productos.id'))
-    sucursal_id = Column(Integer, ForeignKey('sucursales.id'))
-    cantidad = Column(Integer, nullable=False, default=0)
-    ubicacion = Column(String(50))
+    producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
+    sucursal_id = Column(Integer, ForeignKey('sucursales.id'), nullable=False)
+    cantidad = Column(Integer, default=0)
+    ubicacion = Column(String(50)) # Ej. "Pasillo A, Estante 3"
     fecha_actualizacion = Column(DateTime, default=datetime.now)
-    
-    # Relaciones
-    producto = relationship("Producto")
+
+    producto = relationship("Producto", back_populates="inventarios")
     sucursal = relationship("Sucursal", back_populates="inventarios")
 
-    __table_args__ = (
-        CheckConstraint('cantidad >= 0', name='cantidad_inventario_no_negativa'),
-    )
+    __table_args__ = (UniqueConstraint('producto_id', 'sucursal_id', name='uq_producto_sucursal_inventario'),)
+
+    producto = relationship("Producto", backref="inventario_entries")
+    sucursal = relationship("Sucursal", backref="inventario_entries")
+
+    def __repr__(self):
+        return f"<Inventario(id={self.id}, producto_id={self.producto_id}, sucursal_id={self.sucursal_id}, cantidad={self.cantidad})>"
 
 class MovimientoInventario(Base):
     __tablename__ = 'movimientos_inventario'
     id = Column(Integer, primary_key=True)
     fecha = Column(DateTime, default=datetime.now)
-    tipo = Column(String(20), nullable=False)  # entrada, salida, ajuste
-    cantidad = Column(Integer, nullable=False)
-    motivo = Column(String(100))
-    producto_id = Column(Integer, ForeignKey('productos.id'))
-    empleado_id = Column(Integer, ForeignKey('empleados.id'))
-    
-    # Relaciones
+    tipo = Column(String(20), nullable=False) # entrada, salida, ajuste
+    cantidad = Column(Integer, nullable=False) # Positivo para entrada, negativo para salida/ajuste negativo
+    motivo = Column(Text)
+    producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
+    empleado_id = Column(Integer, ForeignKey('empleados.id'), nullable=False)
+
     producto = relationship("Producto", back_populates="movimientos_inventario")
-    empleado = relationship("Empleado")
+    empleado = relationship("Empleado", back_populates="movimientos_inventario")
 
     __table_args__ = (
         CheckConstraint("tipo IN ('entrada', 'salida', 'ajuste')", name='tipo_movimiento_valido'),
+        CheckConstraint('cantidad != 0', name='cantidad_movimiento_no_cero')
     )
 
-class Compra(Base):
-    __tablename__ = 'compras'
-    id = Column(Integer, primary_key=True)
-    numero = Column(String(20), nullable=False, unique=True)
-    fecha = Column(DateTime, default=datetime.now)
-    total = Column(Numeric(10, 2), nullable=False)
-    estado = Column(String(20), default='pendiente')
-    proveedor_id = Column(Integer, ForeignKey('proveedores.id'))
-    empleado_id = Column(Integer, ForeignKey('empleados.id'))
+    def __repr__(self):
+        return f"<MovimientoInventario(id={self.id}, producto_id={self.producto_id}, tipo='{self.tipo}', cantidad={self.cantidad})>"
+
+
+# --- Vistas SQL Mapeadas para ORM ---
+
+# Creamos una base separada para las vistas que no deben ser creadas por Base.metadata.create_all
+BaseView = declarative_base() # <--- NUEVA BASE SOLO PARA VISTAS
+
+# Vista para Productos (usada en CRUD de Productos)
+class VistaProductoDetalle(BaseView):
+    __tablename__ = 'vista_productos_detalle' 
     
-    # Relaciones
-    proveedor = relationship("Proveedor", back_populates="compras")
-    empleado = relationship("Empleado")
-    detalles = relationship("DetalleCompra", back_populates="compra")
+    __table_args__ = ({'extend_existing': True})
 
-    __table_args__ = (
-        CheckConstraint("estado IN ('pendiente', 'recibida', 'cancelada')", name='estado_compra_valido'),
-    )
-
-class DetalleCompra(Base):
-    __tablename__ = 'detalle_compras'
-    id = Column(Integer, primary_key=True)
-    compra_id = Column(Integer, ForeignKey('compras.id'))
-    producto_id = Column(Integer, ForeignKey('productos.id'))
-    cantidad = Column(Integer, nullable=False)
-    precio_unitario = Column(Numeric(10, 2), nullable=False)
-    subtotal = Column(Numeric(10, 2), nullable=False)
+    id = Column(Integer, primary_key=True) # La VIEW debe retornar el ID de Producto
+    codigo = Column(String)
+    nombre_producto = Column(String)
+    precio = Column(Numeric)
+    stock = Column(Integer)
+    stock_minimo = Column(Integer)
+    nombre_categoria = Column(String)
+    fecha_creacion = Column(DateTime)
     
-    # Relaciones
-    compra = relationship("Compra", back_populates="detalles")
-    producto = relationship("Producto")
 
-    __table_args__ = (
-        CheckConstraint('cantidad > 0', name='cantidad_compra_positiva'),
-        CheckConstraint('precio_unitario > 0', name='precio_compra_positivo')
-    )
+# Vista para Clientes (usada en CRUD de Clientes)
+class VistaClienteResumen(BaseView):
+    __tablename__ = 'vista_clientes_resumen' 
+    
+    __table_args__ = ({'extend_existing': True})
 
-# --------------------------------------------
-# FUNCIÓN PARA CREAR LAS TABLAS
-# --------------------------------------------
+    id = Column(Integer, primary_key=True) # La VIEW debe retornar el ID de Cliente
+    codigo = Column(String)
+    nombre_completo = Column(String)
+    dni = Column(TipoDNI) 
+    telefono = Column(TipoTelefono)
+    email = Column(TipoEmail)
+    fecha_registro = Column(DateTime)
+    
 
+# Vista para Empleados (usada en CRUD de Empleados)
+class VistaEmpleadoResumen(BaseView):
+    __tablename__ = 'vista_empleados_resumen'
+    
+    __table_args__ = ({'extend_existing': True})
+
+    id = Column(Integer, primary_key=True) # La VIEW debe retornar el ID de Empleado
+    codigo = Column(String)
+    nombre_completo = Column(String)
+    email = Column(TipoEmail)
+    telefono = Column(TipoTelefono)
+    salario = Column(Numeric)
+    nombre_puesto = Column(String)
+    fecha_ingreso = Column(DateTime)
+
+# --- Función para crear todas las tablas ---
 def crear_tablas():
-    """Crea todas las tablas en la base de datos"""
+    print("Creando tablas en la base de datos...")
     try:
         Base.metadata.create_all(engine)
-        print("✅ Tablas creadas exitosamente!")
+        print("Tablas creadas exitosamente.")
         return True
     except Exception as e:
-        print(f"❌ Error al crear tablas: {e}")
+        print(f"Error al crear tablas: {e}")
         return False
 
-def obtener_session():
-    """Retorna una nueva sesión de SQLAlchemy"""
-    return Session()
-
-# --------------------------------------------
-# FUNCIONES AUXILIARES
-# --------------------------------------------
-
-def listar_tablas():
-    """Lista todas las tablas del modelo"""
-    tablas = []
-    for tabla in Base.metadata.tables.keys():
-        tablas.append(tabla)
-    return sorted(tablas)
-
-def contar_tablas():
-    """Cuenta el número total de tablas"""
-    return len(Base.metadata.tables)
-
+# Ejecutar la creación de tablas si el script se ejecuta directamente
 if __name__ == '__main__':
-    print("🔧 Iniciando creación de base de datos...")
-    print(f"📊 Total de tablas a crear: {contar_tablas()}")
-    print(f"🏷️  Tablas: {', '.join(listar_tablas())}")
-    
-    if crear_tablas():
-        print("🎉 Base de datos lista para usar!")
-    else:
-        print("💥 Error en la configuración de la base de datos")
+    crear_tablas()
