@@ -1,10 +1,10 @@
 from database import Session, engine
 from database import (
-    # Tus modelos de tablas para C/U/D
+   
     Categoria, Producto, Proveedor, Cliente, Pedido, DetallePedido, Servicio,
     Empleado, Departamento, Puesto, Factura, Pago, Venta, DetalleVenta, Sucursal,
     Inventario, MovimientoInventario,
-    # Tus modelos de VISTAS para el R (Read/Index)
+    
     VistaProductoDetalle, VistaClienteResumen, VistaEmpleadoResumen
 )
 from datetime import datetime, date
