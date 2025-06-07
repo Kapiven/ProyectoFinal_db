@@ -8,7 +8,7 @@ import psycopg2 # Necesario para las funciones SQL en queries.py
 from datetime import datetime, date
 
 # Configuración de la base de datos
-DATABASE_URL = "postgresql+psycopg2://postgres:datos2025@localhost/institucion"
+DATABASE_URL = "postgresql+psycopg2://usuario:contraseña@localhost/nombre-de-la-basededatos"
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 Base = declarative_base()
